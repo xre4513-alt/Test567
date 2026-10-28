@@ -11,10 +11,16 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 BASE_URL = os.environ.get("TEST_URL", "").strip()
-RUNS = max(1, min(int(os.environ.get("RUNS", "1") or "1"), 5))  # safety cap: max 5
+RUNS = max(1, min(int(os.environ.get("RUNS", "1") or "1"), 30))  # safety cap: max 30
 DEBUG = os.environ.get("DEBUG_MODE", "0") == "1"
 HEADLESS = os.environ.get("HEADLESS", "1") == "1"
-SUCCESS_TEXT = os.environ.get("SUCCESS_TEXT", "").strip()  # optional: success page par dikhne wala text
+SUCCESS_TEXT = os.environ.get("SUCCESS_TEXT", "").strip()  # optional: signup ke baad dikhne wala text
+
+# Optional overrides
+TEST_PHONE = os.environ.get("TEST_PHONE", "").strip()  # fixed phone (sirf pehle run ke liye)
+TEST_CITY = os.environ.get("TEST_CITY", "").strip() or "Bhubaneswar"
+REFERRAL_CODE = os.environ.get("REFERRAL_CODE", "").strip()  # optional
+PASSWORD = os.environ.get("TEST_PASSWORD", "").strip() or "TestPass@123"
 
 
 def rand_str(n=6):
@@ -37,7 +43,6 @@ def dump_page(driver):
     for el in driver.find_elements(By.XPATH, "//input | //button | //select | //textarea"):
         print(
             "TAG:", el.tag_name,
-            "| name:", el.get_attribute("name"),
             "| id:", el.get_attribute("id"),
             "| type:", el.get_attribute("type"),
             "| placeholder:", el.get_attribute("placeholder"),
@@ -45,35 +50,26 @@ def dump_page(driver):
         )
 
 
-def find_field(driver, kind):
-    """Page ke visible input me se sahi field dhoondhta hai."""
-    inputs = [e for e in driver.find_elements(By.TAG_NAME, "input") if e.is_displayed()]
+def fill(driver, wait, field_id, value):
+    el = wait.until(EC.visibility_of_element_located((By.ID, field_id)))
+    el.clear()
+    el.send_keys(value)
+    return el
 
-    def attrs(e):
-        return " ".join(
-            (e.get_attribute(a) or "").lower() for a in ("name", "id", "placeholder", "type")
-        )
 
-    if kind == "password":
-        for e in inputs:
-            if (e.get_attribute("type") or "").lower() == "password":
-                return e
-    elif kind == "phone":
-        for e in inputs:
-            a = attrs(e)
-            if (e.get_attribute("type") or "").lower() == "tel" or any(
-                k in a for k in ("phone", "mobile", "contact", "number")
-            ):
-                return e
-    elif kind == "name":
-        for e in inputs:
-            a = attrs(e)
-            if any(k in a for k in ("name", "fullname", "full_name", "full name")) and "user" not in a:
-                return e
-        for e in inputs:  # fallback: pehla text input
-            if (e.get_attribute("type") or "text").lower() == "text":
-                return e
-    return None
+def open_signup_form(driver, wait):
+    """Agar signup form pehle se visible nahi hai to 'Sign Up' tab dabao."""
+    try:
+        driver.find_element(By.ID, "name").is_displayed() and None
+        if driver.find_element(By.ID, "name").is_displayed():
+            return
+    except Exception:
+        pass
+    tab = driver.find_element(
+        By.XPATH, "//button[normalize-space(.)='Sign Up']"
+    )
+    driver.execute_script("arguments[0].click();", tab)
+    wait.until(EC.visibility_of_element_located((By.ID, "name")))
 
 
 def run_signup_test(i):
@@ -89,38 +85,23 @@ def run_signup_test(i):
             dump_page(driver)
             return True
 
+        open_signup_form(driver, wait)
         start_url = driver.current_url
 
-        name_el = find_field(driver, "name")
-        phone_el = find_field(driver, "phone")
-        pass_el = find_field(driver, "password")
+        phone = TEST_PHONE if (TEST_PHONE and i == 0) else "9" + "".join(random.choices(string.digits, k=9))
 
-        missing = [k for k, v in (("name", name_el), ("phone", phone_el), ("password", pass_el)) if v is None]
-        if missing:
-            raise RuntimeError(f"Fields nahi mile: {missing} (DEBUG_MODE=1 chalake dekho)")
+        fill(driver, wait, "name", f"Test {rand_str()}")
+        fill(driver, wait, "phone", phone)
+        fill(driver, wait, "place", TEST_CITY)
+        fill(driver, wait, "password", PASSWORD)
 
-        name_el.send_keys(f"Test {rand_str()}")
-        phone_el.send_keys("9" + "".join(random.choices(string.digits, k=9)))
-        pass_el.send_keys("TestPass@123")
+        if REFERRAL_CODE:
+            fill(driver, wait, "referralCode", REFERRAL_CODE)
 
-        # Agar confirm password field ho
-        pw_fields = [
-            e for e in driver.find_elements(By.XPATH, "//input[@type='password']") if e.is_displayed()
-        ]
-        for extra in pw_fields[1:]:
-            extra.send_keys("TestPass@123")
-
-        # Checkbox (terms) ho to tick karo
-        for cb in driver.find_elements(By.XPATH, "//input[@type='checkbox']"):
-            if cb.is_displayed() and not cb.is_selected():
-                driver.execute_script("arguments[0].click();", cb)
-
-        submit = driver.find_element(
-            By.XPATH,
-            "//button[@type='submit'] | //input[@type='submit'] | "
-            "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'sign') "
-            "or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'create') "
-            "or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'register')]",
+        submit = wait.until(
+            EC.presence_of_element_located(
+                (By.XPATH, "//button[@type='submit' and contains(normalize-space(.), 'Create Account')]")
+            )
         )
         driver.execute_script("arguments[0].click();", submit)
 
@@ -131,7 +112,7 @@ def run_signup_test(i):
             wait.until(lambda d: d.current_url != start_url)
 
         ok = True
-        print(f"[{i + 1}/{RUNS}] SUCCESS -> {driver.current_url}")
+        print(f"[{i + 1}/{RUNS}] SUCCESS (phone {phone}) -> {driver.current_url}")
     except Exception as e:
         print(f"[{i + 1}/{RUNS}] FAILED: {type(e).__name__}: {e}")
     finally:
